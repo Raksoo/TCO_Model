@@ -169,6 +169,13 @@ def compute_simple_amortization(total_investment, annual_revenue):
     return float(total_investment / annual_revenue)
 
 
+def compute_profit_after_break_even(cumulative_cashflow, payback_years):
+    """Gewinn nach Break-even bis zum Ende der Batterielebensdauer."""
+    if np.isnan(payback_years):
+        return np.nan
+    return float(max(0.0, cumulative_cashflow[-1]))
+
+
 def compute_case_npv(
     diesel_price_case,
     electricity_price_case,
@@ -247,13 +254,14 @@ with st.sidebar:
     electricity_price = st.number_input("Strompreis (€/kWh)", min_value=0.0, value=0.10, step=0.01, format="%.2f")
     charge_efficiency = st.number_input("Ladeeffizienz", min_value=0.1, max_value=1.0, value=0.88, step=0.01, format="%.2f")
     battery_maintenance = st.number_input("Wartung Batterie (€/Tag)", min_value=0.0, value=7.0, step=1.0)
-    battery_capex = st.number_input("Batterie CAPEX (€)", min_value=0.0, value=12500.0, step=500.0)
+    battery_capex = st.number_input("Batterie CAPEX (€)", min_value=0.0, value=50000.0, step=500.0)
     charging_infra_capex = st.number_input("Ladeinfrastruktur CAPEX (€)", min_value=0.0, value=0.0, step=500.0)
     grid_connection_capex = st.number_input("Netzanschluss CAPEX (€)", min_value=0.0, value=0.0, step=500.0)
+    battery_lifetime_years = st.number_input("Lebensdauer Batterie (Jahre)", min_value=1, max_value=30, value=5, step=1)
     degradation_pct = st.number_input("Degradation (% pro Jahr)", min_value=0.0, max_value=100.0, value=3.0, step=0.5)
 
     st.header("Allgemein")
-    daily_demand = st.number_input("Tagesbedarf (kWh/Tag)", min_value=0.1, value=100.0, step=5.0)
+    daily_demand = st.number_input("Tagesbedarf (kWh/Tag)", min_value=0.1, value=350.0, step=5.0)
     operating_days = st.number_input("Betriebstage pro Jahr", min_value=1, max_value=366, value=220, step=1)
     horizon_years = st.number_input("Betrachtungszeitraum (Jahre)", min_value=1, max_value=30, value=5, step=1)
     discount_rate_pct = st.number_input("Diskontsatz (%)", min_value=0.0, value=8.0, step=0.5)
@@ -277,6 +285,7 @@ degradation_rate = degradation_pct / 100.0
 infrastructure_invest = charging_infra_capex + grid_connection_capex
 total_battery_investment = battery_capex + infrastructure_invest
 diesel_consumption_override = diesel_consumption_per_day if use_manual_diesel_consumption else None
+effective_horizon_years = int(min(horizon_years, battery_lifetime_years))
 
 # Kernberechnungen
 daily = compute_daily(
@@ -303,7 +312,7 @@ simple_amortization_years = compute_simple_amortization(total_battery_investment
 years, cashflows, cumulative_cashflow, annual_savings = compute_cashflows(
     savings_per_day=savings_per_day,
     operating_days_per_year=int(operating_days),
-    horizon_years=int(horizon_years),
+    horizon_years=effective_horizon_years,
     battery_capex=battery_capex,
     degradation_rate=degradation_rate,
     total_battery_investment=total_battery_investment,
@@ -312,6 +321,7 @@ years, cashflows, cumulative_cashflow, annual_savings = compute_cashflows(
 npv = compute_npv(cashflows, discount_rate)
 irr = compute_irr(cashflows)
 payback_years = compute_payback(cumulative_cashflow)
+profit_after_break_even = compute_profit_after_break_even(cumulative_cashflow, payback_years)
 co2_savings_per_year_t = (daily["diesel_co2_kg_per_day"] * operating_days) / 1000.0
 
 with st.sidebar:
@@ -325,6 +335,11 @@ st.caption(
     f"Aktives Szenario: **{scenario}** | Effektiver Dieselpreis: **{adj_diesel_price:.2f} €/l** | "
     f"Effektiver Strompreis: **{adj_electricity_price:.2f} €/kWh**"
 )
+if int(horizon_years) > int(battery_lifetime_years):
+    st.info(
+        f"Cashflow/Amortisation werden auf die Batterielebensdauer begrenzt: "
+        f"{int(battery_lifetime_years)} Jahre (statt {int(horizon_years)} Jahre Betrachtungszeitraum)."
+    )
 
 tab1, tab2, tab3, tab4 = st.tabs(["Daily Vergleich", "Amortisation", "KPIs", "Sensitivität"])
 
@@ -393,6 +408,11 @@ with tab2:
         f"Statische Amortisation: CAPEX / Einnahmen pro Jahr = {total_battery_investment:,.2f} € / "
         f"{annual_revenue:,.2f} € = {format_payback(simple_amortization_years)}"
     )
+    st.caption(
+        "Cashflow-Linie endet mit dem Ersatzzeitpunkt (Batterie-Lebensdauer)."
+    )
+    if not np.isnan(profit_after_break_even):
+        st.caption(f"Gewinn nach Break-even bis Ersatz: {profit_after_break_even:,.2f} €")
 
     fig_cf, ax_cf = plt.subplots()
     ax_cf.plot(years, cumulative_cashflow, marker="o")
@@ -415,6 +435,7 @@ with tab3:
     col1, col2, col3 = st.columns(3)
     col4, col5, col6 = st.columns(3)
     col7, col8, col9, col10 = st.columns(4)
+    col11, col12 = st.columns(2)
 
     col1.metric("OPEX Diesel (€/Tag)", f"{daily['diesel_opex_per_day']:.2f}")
     col2.metric("OPEX Batterie (€/Tag)", f"{daily['battery_opex_per_day']:.2f}")
@@ -427,12 +448,19 @@ with tab3:
     col8.metric("Infrastruktur-Invest Batterie (€)", f"{infrastructure_invest:,.2f}")
     col9.metric("CO2-Ausstoß Diesel (kg/Tag)", f"{daily['diesel_co2_kg_per_day']:.2f}")
     col10.metric("CO2-Ersparnis pro Jahr (t)", f"{co2_savings_per_year_t:.2f}")
-    st.metric("Amortisation (CAPEX/Einnahmen)", format_payback(simple_amortization_years))
+    col11.metric("Amortisation (CAPEX/Einnahmen)", format_payback(simple_amortization_years))
+    col12.metric(
+        "Gewinn nach Break-even bis Ersatz (€)",
+        "n/a" if np.isnan(profit_after_break_even) else f"{profit_after_break_even:,.2f}",
+    )
 
     st.markdown(
         f"**Jährliche Einsparung (Jahr 1):** {annual_savings:,.2f} €  \\\n"
         f"**Gesamtinvestition Batterie + Infrastruktur:** {total_battery_investment:,.2f} €  \\\n"
-        f"**Annahmen:** {int(operating_days)} Betriebstage/Jahr, Horizont {int(horizon_years)} Jahre, Diskontsatz {discount_rate_pct:.2f}%, Degradation {degradation_pct:.2f}%, Einnahmen-Anpassung {revenue_adjustment_pct:+d}%"
+        f"**Annahmen:** {int(operating_days)} Betriebstage/Jahr, "
+        f"Horizont {effective_horizon_years} Jahre (Lebensdauer {int(battery_lifetime_years)}), "
+        f"Diskontsatz {discount_rate_pct:.2f}%, Degradation {degradation_pct:.2f}%, "
+        f"Einnahmen-Anpassung {revenue_adjustment_pct:+d}%"
     )
 
 with tab4:
@@ -457,7 +485,7 @@ with tab4:
             co2_price=co2_price,
             diesel_emission_factor=diesel_emission_factor,
             operating_days=operating_days,
-            horizon_years=horizon_years,
+            horizon_years=effective_horizon_years,
             total_investment=total_battery_investment,
             degradation_rate=degradation_rate,
             discount_rate=discount_rate,
@@ -482,7 +510,7 @@ with tab4:
             co2_price=co2_price,
             diesel_emission_factor=diesel_emission_factor,
             operating_days=operating_days,
-            horizon_years=horizon_years,
+            horizon_years=effective_horizon_years,
             total_investment=total_battery_investment,
             degradation_rate=degradation_rate,
             discount_rate=discount_rate,
