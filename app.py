@@ -68,10 +68,14 @@ def compute_cashflows(
     battery_capex,
     degradation_rate=0.0,
     total_battery_investment=None,
+    annual_inflow_year_1=None,
 ):
     """Erstellt Cashflow-Reihe: Jahr 0 = -CAPEX, Jahr 1..n = jährliche Einsparung."""
     investment = battery_capex if total_battery_investment is None else total_battery_investment
-    annual_savings_year_1 = savings_per_day * operating_days_per_year
+    if annual_inflow_year_1 is None:
+        annual_savings_year_1 = savings_per_day * operating_days_per_year
+    else:
+        annual_savings_year_1 = annual_inflow_year_1
     annual_savings_series = np.array(
         [annual_savings_year_1 * ((1.0 - degradation_rate) ** (year - 1)) for year in range(1, horizon_years + 1)],
         dtype=float,
@@ -158,6 +162,13 @@ def format_irr(irr):
     return f"{irr * 100:.2f} %"
 
 
+def compute_simple_amortization(total_investment, annual_revenue):
+    """Einfache statische Amortisation: CAPEX / Einnahmen pro Jahr."""
+    if annual_revenue <= 0:
+        return np.nan
+    return float(total_investment / annual_revenue)
+
+
 def compute_case_npv(
     diesel_price_case,
     electricity_price_case,
@@ -177,6 +188,7 @@ def compute_case_npv(
     degradation_rate,
     discount_rate,
     diesel_consumption_override_l_per_day=None,
+    revenue_adjustment_factor=1.0,
 ):
     daily_case = compute_daily(
         daily_demand_kwh=daily_demand,
@@ -194,6 +206,8 @@ def compute_case_npv(
         diesel_consumption_override_l_per_day=diesel_consumption_override_l_per_day,
     )
     savings_per_day_case = daily_case["diesel_opex_per_day"] - daily_case["battery_opex_per_day"]
+    max_revenue_case = max(0.0, savings_per_day_case * operating_days)
+    annual_revenue_case = max(0.0, max_revenue_case * revenue_adjustment_factor)
     _, cashflows_case, _, _ = compute_cashflows(
         savings_per_day=savings_per_day_case,
         operating_days_per_year=int(operating_days),
@@ -201,6 +215,7 @@ def compute_case_npv(
         battery_capex=total_investment,
         degradation_rate=degradation_rate,
         total_battery_investment=total_investment,
+        annual_inflow_year_1=annual_revenue_case,
     )
     return compute_npv(cashflows_case, discount_rate)
 
@@ -232,6 +247,7 @@ with st.sidebar:
     electricity_price = st.number_input("Strompreis (€/kWh)", min_value=0.0, value=0.10, step=0.01, format="%.2f")
     charge_efficiency = st.number_input("Ladeeffizienz", min_value=0.1, max_value=1.0, value=0.88, step=0.01, format="%.2f")
     battery_maintenance = st.number_input("Wartung Batterie (€/Tag)", min_value=0.0, value=7.0, step=1.0)
+    battery_capex = st.number_input("Batterie CAPEX (€)", min_value=0.0, value=12500.0, step=500.0)
     charging_infra_capex = st.number_input("Ladeinfrastruktur CAPEX (€)", min_value=0.0, value=0.0, step=500.0)
     grid_connection_capex = st.number_input("Netzanschluss CAPEX (€)", min_value=0.0, value=0.0, step=500.0)
     degradation_pct = st.number_input("Degradation (% pro Jahr)", min_value=0.0, max_value=100.0, value=3.0, step=0.5)
@@ -241,6 +257,7 @@ with st.sidebar:
     operating_days = st.number_input("Betriebstage pro Jahr", min_value=1, max_value=366, value=220, step=1)
     horizon_years = st.number_input("Betrachtungszeitraum (Jahre)", min_value=1, max_value=30, value=5, step=1)
     discount_rate_pct = st.number_input("Diskontsatz (%)", min_value=0.0, value=8.0, step=0.5)
+    revenue_adjustment_pct = st.slider("Abschlag/Aufschlag Einnahmen (%)", min_value=-50, max_value=50, value=0, step=5)
 
     st.header("Optional CO2")
     include_co2_costs = st.checkbox("CO2-Kosten berücksichtigen", value=False)
@@ -258,7 +275,7 @@ adj_diesel_price, adj_electricity_price = apply_scenario(diesel_price, electrici
 discount_rate = discount_rate_pct / 100.0
 degradation_rate = degradation_pct / 100.0
 infrastructure_invest = charging_infra_capex + grid_connection_capex
-total_battery_investment = infrastructure_invest
+total_battery_investment = battery_capex + infrastructure_invest
 diesel_consumption_override = diesel_consumption_per_day if use_manual_diesel_consumption else None
 
 # Kernberechnungen
@@ -279,18 +296,30 @@ daily = compute_daily(
 )
 
 savings_per_day = daily["diesel_opex_per_day"] - daily["battery_opex_per_day"]
+max_annual_revenue = max(0.0, savings_per_day * operating_days)
+revenue_adjustment_factor = 1.0 + (revenue_adjustment_pct / 100.0)
+annual_revenue = max(0.0, max_annual_revenue * revenue_adjustment_factor)
+simple_amortization_years = compute_simple_amortization(total_battery_investment, annual_revenue)
 years, cashflows, cumulative_cashflow, annual_savings = compute_cashflows(
     savings_per_day=savings_per_day,
     operating_days_per_year=int(operating_days),
     horizon_years=int(horizon_years),
-    battery_capex=0.0,
+    battery_capex=battery_capex,
     degradation_rate=degradation_rate,
     total_battery_investment=total_battery_investment,
+    annual_inflow_year_1=annual_revenue,
 )
 npv = compute_npv(cashflows, discount_rate)
 irr = compute_irr(cashflows)
 payback_years = compute_payback(cumulative_cashflow)
 co2_savings_per_year_t = (daily["diesel_co2_kg_per_day"] * operating_days) / 1000.0
+
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("Amortisation (statisch)")
+    st.metric("Max. Einnahmen pro Jahr (€)", f"{max_annual_revenue:,.2f}")
+    st.metric("Angesetzte Einnahmen pro Jahr (€)", f"{annual_revenue:,.2f}")
+    st.metric("Amortisation (Jahre)", format_payback(simple_amortization_years))
 
 st.caption(
     f"Aktives Szenario: **{scenario}** | Effektiver Dieselpreis: **{adj_diesel_price:.2f} €/l** | "
@@ -349,16 +378,21 @@ with tab1:
 
 with tab2:
     st.subheader("Cashflow und Amortisation")
+    annual_savings_col = np.array(["-"] + [f"{v:,.2f}" for v in cashflows[1:]], dtype=object)
 
     cashflow_df = pd.DataFrame(
         {
             "Jahr": years,
             "Cashflow (€)": np.round(cashflows, 2),
             "Kumuliert (€)": np.round(cumulative_cashflow, 2),
-            "Einsparung im Jahr (€)": np.round(np.insert(cashflows[1:], 0, np.nan), 2),
+            "Einsparung im Jahr (€)": annual_savings_col,
         }
     )
     st.dataframe(cashflow_df, use_container_width=True, hide_index=True)
+    st.caption(
+        f"Statische Amortisation: CAPEX / Einnahmen pro Jahr = {total_battery_investment:,.2f} € / "
+        f"{annual_revenue:,.2f} € = {format_payback(simple_amortization_years)}"
+    )
 
     fig_cf, ax_cf = plt.subplots()
     ax_cf.plot(years, cumulative_cashflow, marker="o")
@@ -368,6 +402,8 @@ with tab2:
         payback_value = np.interp(payback_years, years, cumulative_cashflow)
         ax_cf.scatter([payback_years], [payback_value], zorder=3)
         ax_cf.annotate(f"Payback: {payback_years:.2f} J", (payback_years, payback_value), textcoords="offset points", xytext=(8, 8))
+    else:
+        st.info("Im gewählten Horizont wird kein Payback erreicht.")
 
     ax_cf.set_xlabel("Jahr")
     ax_cf.set_ylabel("Kumulierter Cashflow (€)")
@@ -391,11 +427,12 @@ with tab3:
     col8.metric("Infrastruktur-Invest Batterie (€)", f"{infrastructure_invest:,.2f}")
     col9.metric("CO2-Ausstoß Diesel (kg/Tag)", f"{daily['diesel_co2_kg_per_day']:.2f}")
     col10.metric("CO2-Ersparnis pro Jahr (t)", f"{co2_savings_per_year_t:.2f}")
+    st.metric("Amortisation (CAPEX/Einnahmen)", format_payback(simple_amortization_years))
 
     st.markdown(
         f"**Jährliche Einsparung (Jahr 1):** {annual_savings:,.2f} €  \\\n"
-        f"**Gesamtinvestition Infrastruktur:** {total_battery_investment:,.2f} €  \\\n"
-        f"**Annahmen:** {int(operating_days)} Betriebstage/Jahr, Horizont {int(horizon_years)} Jahre, Diskontsatz {discount_rate_pct:.2f}%, Degradation {degradation_pct:.2f}%"
+        f"**Gesamtinvestition Batterie + Infrastruktur:** {total_battery_investment:,.2f} €  \\\n"
+        f"**Annahmen:** {int(operating_days)} Betriebstage/Jahr, Horizont {int(horizon_years)} Jahre, Diskontsatz {discount_rate_pct:.2f}%, Degradation {degradation_pct:.2f}%, Einnahmen-Anpassung {revenue_adjustment_pct:+d}%"
     )
 
 with tab4:
@@ -425,6 +462,7 @@ with tab4:
             degradation_rate=degradation_rate,
             discount_rate=discount_rate,
             diesel_consumption_override_l_per_day=diesel_consumption_override,
+            revenue_adjustment_factor=revenue_adjustment_factor,
         )
         for factor in factors
     ]
@@ -449,6 +487,7 @@ with tab4:
             degradation_rate=degradation_rate,
             discount_rate=discount_rate,
             diesel_consumption_override_l_per_day=diesel_consumption_override,
+            revenue_adjustment_factor=revenue_adjustment_factor,
         )
         for factor in factors
     ]
