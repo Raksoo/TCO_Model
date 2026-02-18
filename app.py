@@ -21,10 +21,15 @@ def compute_daily(
     include_co2_costs=False,
     co2_price_per_t=0.0,
     diesel_emission_factor_kg_per_l=2.68,
+    diesel_consumption_override_l_per_day=None,
 ):
     """Berechnet tägliche OPEX für Diesel und Batterie."""
     diesel_base_l_per_day = daily_demand_kwh / generator_eff_kwh_per_l
-    diesel_l_per_day = diesel_base_l_per_day * part_load_factor
+    if diesel_consumption_override_l_per_day is None:
+        diesel_l_per_day = diesel_base_l_per_day * part_load_factor
+    else:
+        diesel_l_per_day = diesel_consumption_override_l_per_day
+        diesel_base_l_per_day = diesel_l_per_day / part_load_factor if part_load_factor > 0 else diesel_l_per_day
     diesel_energy_cost = diesel_l_per_day * diesel_price
 
     diesel_co2_kg_per_day = diesel_l_per_day * diesel_emission_factor_kg_per_l
@@ -171,6 +176,7 @@ def compute_case_npv(
     total_investment,
     degradation_rate,
     discount_rate,
+    diesel_consumption_override_l_per_day=None,
 ):
     daily_case = compute_daily(
         daily_demand_kwh=daily_demand,
@@ -185,6 +191,7 @@ def compute_case_npv(
         include_co2_costs=include_co2_costs,
         co2_price_per_t=co2_price,
         diesel_emission_factor_kg_per_l=diesel_emission_factor,
+        diesel_consumption_override_l_per_day=diesel_consumption_override_l_per_day,
     )
     savings_per_day_case = daily_case["diesel_opex_per_day"] - daily_case["battery_opex_per_day"]
     _, cashflows_case, _, _ = compute_cashflows(
@@ -209,6 +216,15 @@ with st.sidebar:
     diesel_price = st.number_input("Dieselpreis (€/l)", min_value=0.0, value=1.75, step=0.05)
     generator_eff = st.number_input("Wirkungsgrad Generator (kWh/l)", min_value=0.1, value=3.0, step=0.1)
     part_load_factor = st.number_input("Teillast-Faktor", min_value=0.5, value=1.15, step=0.01, format="%.2f")
+    use_manual_diesel_consumption = st.checkbox("Dieselverbrauch pro Tag manuell eingeben", value=False)
+    diesel_consumption_per_day = st.number_input(
+        "Dieselverbrauch pro Tag (l/Tag)",
+        min_value=0.0,
+        value=38.33,
+        step=0.1,
+        format="%.2f",
+        disabled=not use_manual_diesel_consumption,
+    )
     diesel_maintenance = st.number_input("Wartung Diesel (€/Tag)", min_value=0.0, value=15.0, step=1.0)
     diesel_logistics = st.number_input("Logistikkosten pro Tag (€)", min_value=0.0, value=0.0, step=5.0)
 
@@ -216,7 +232,6 @@ with st.sidebar:
     electricity_price = st.number_input("Strompreis (€/kWh)", min_value=0.0, value=0.10, step=0.01, format="%.2f")
     charge_efficiency = st.number_input("Ladeeffizienz", min_value=0.1, max_value=1.0, value=0.88, step=0.01, format="%.2f")
     battery_maintenance = st.number_input("Wartung Batterie (€/Tag)", min_value=0.0, value=7.0, step=1.0)
-    battery_capex = st.number_input("Batterie CAPEX (€)", min_value=0.0, value=12500.0, step=500.0)
     charging_infra_capex = st.number_input("Ladeinfrastruktur CAPEX (€)", min_value=0.0, value=0.0, step=500.0)
     grid_connection_capex = st.number_input("Netzanschluss CAPEX (€)", min_value=0.0, value=0.0, step=500.0)
     degradation_pct = st.number_input("Degradation (% pro Jahr)", min_value=0.0, max_value=100.0, value=3.0, step=0.5)
@@ -243,7 +258,8 @@ adj_diesel_price, adj_electricity_price = apply_scenario(diesel_price, electrici
 discount_rate = discount_rate_pct / 100.0
 degradation_rate = degradation_pct / 100.0
 infrastructure_invest = charging_infra_capex + grid_connection_capex
-total_battery_investment = battery_capex + infrastructure_invest
+total_battery_investment = infrastructure_invest
+diesel_consumption_override = diesel_consumption_per_day if use_manual_diesel_consumption else None
 
 # Kernberechnungen
 daily = compute_daily(
@@ -259,6 +275,7 @@ daily = compute_daily(
     include_co2_costs=include_co2_costs,
     co2_price_per_t=co2_price,
     diesel_emission_factor_kg_per_l=diesel_emission_factor,
+    diesel_consumption_override_l_per_day=diesel_consumption_override,
 )
 
 savings_per_day = daily["diesel_opex_per_day"] - daily["battery_opex_per_day"]
@@ -266,7 +283,7 @@ years, cashflows, cumulative_cashflow, annual_savings = compute_cashflows(
     savings_per_day=savings_per_day,
     operating_days_per_year=int(operating_days),
     horizon_years=int(horizon_years),
-    battery_capex=battery_capex,
+    battery_capex=0.0,
     degradation_rate=degradation_rate,
     total_battery_investment=total_battery_investment,
 )
@@ -377,7 +394,7 @@ with tab3:
 
     st.markdown(
         f"**Jährliche Einsparung (Jahr 1):** {annual_savings:,.2f} €  \\\n"
-        f"**Gesamtinvestition Batterie:** {total_battery_investment:,.2f} €  \\\n"
+        f"**Gesamtinvestition Infrastruktur:** {total_battery_investment:,.2f} €  \\\n"
         f"**Annahmen:** {int(operating_days)} Betriebstage/Jahr, Horizont {int(horizon_years)} Jahre, Diskontsatz {discount_rate_pct:.2f}%, Degradation {degradation_pct:.2f}%"
     )
 
@@ -407,6 +424,7 @@ with tab4:
             total_investment=total_battery_investment,
             degradation_rate=degradation_rate,
             discount_rate=discount_rate,
+            diesel_consumption_override_l_per_day=diesel_consumption_override,
         )
         for factor in factors
     ]
@@ -430,6 +448,7 @@ with tab4:
             total_investment=total_battery_investment,
             degradation_rate=degradation_rate,
             discount_rate=discount_rate,
+            diesel_consumption_override_l_per_day=diesel_consumption_override,
         )
         for factor in factors
     ]
