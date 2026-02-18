@@ -1,7 +1,11 @@
 import numpy as np
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
+try:
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError:
+    st.error("Matplotlib ist nicht installiert. Bitte: `pip install -r requirements.txt`")
+    st.stop()
 
 
 def compute_daily(
